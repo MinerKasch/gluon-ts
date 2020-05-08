@@ -119,6 +119,10 @@ def make_evaluation_predictions_onestep(
     be used in evaluations where accuracy is evaluated on the last portion of
     the target.
 
+    This is a variation that expects a one-step predictor. I.e. a predictor
+    that predicts only the next timestep. This function applies that predictor
+    across all timesteps in the test set
+
     Parameters
     ----------
     dataset
@@ -133,7 +137,7 @@ def make_evaluation_predictions_onestep(
     -------
     """
 
-    #prediction_length = predictor.prediction_length
+    assert predictor.prediction_length == 1
     assert prediction_length >= predictor.prediction_length
     freq = predictor.freq
     lead_time = predictor.lead_time
@@ -171,7 +175,7 @@ def make_evaluation_predictions_onestep(
     # TODO the test set may be gone otherwise with such a filtering)
 
     # For each timepoint in the test sample, apply the one-step predictor.
-    # This means truncating the dataset using pred_i
+    # This means truncating the dataset by taking a number of different datasets [:-pred_i]
     forecast_lists = []
     for pred_i in range(1, prediction_length+1):
         # truncate_target will reference pred_i
@@ -179,7 +183,13 @@ def make_evaluation_predictions_onestep(
             dataset, transformations=[transform.AdhocTransform(truncate_target)]
         )
         forecast_lists.append(list(predictor.predict(dataset_trunc, num_samples=num_samples)))
+    # Currently the list of length prediction_length, where each item is of
+    # length of the number of time series. Make it instead a list with one
+    # sublist per time series, where the sublist is of length
+    # prediction_length corresponding to all the one-step predictions.
     forecast_lists = list(zip(*forecast_lists))
+
+    # For each time series, merge the one-step predictions together into one numpy array
     forecasts_out = []
     for timeseries in forecast_lists:
         first_fc = timeseries[-1]
@@ -189,9 +199,6 @@ def make_evaluation_predictions_onestep(
         first_fc.samples = samples
         fc = SampleForecast(samples, first_fc.start_date, first_fc.freq)
         forecasts_out.append(fc)
-
-    # Now construct a new preds by combining the information from each.
-
 
     return (
         forecasts_out,
