@@ -17,6 +17,7 @@ import re
 from typing import Dict, Iterator, NamedTuple, Optional, Tuple, Union
 
 # Third-party imports
+import numpy as np
 import pandas as pd
 
 # First-party imports
@@ -32,7 +33,7 @@ from gluonts.dataset.stat import (
 )
 from gluonts.evaluation import Evaluator
 from gluonts.model.estimator import Estimator, GluonEstimator
-from gluonts.model.forecast import Forecast
+from gluonts.model.forecast import Forecast, SampleForecast
 from gluonts.model.predictor import GluonPredictor, Predictor
 from gluonts.support.util import maybe_len
 from gluonts.transform import TransformedDataset
@@ -107,6 +108,95 @@ def make_evaluation_predictions(
         ts_iter(dataset),
     )
 
+
+def make_evaluation_predictions_onestep(
+    dataset: Dataset, predictor: Predictor, num_samples: int,
+    prediction_length: int
+) -> Tuple[Iterator[Forecast], Iterator[pd.Series]]:
+    """
+    Return predictions on the last portion of predict_length time units of the
+    target. Such portion is cut before making predictions, such a function can
+    be used in evaluations where accuracy is evaluated on the last portion of
+    the target.
+
+    Parameters
+    ----------
+    dataset
+        Dataset where the evaluation will happen. Only the portion excluding
+        the prediction_length portion is used when making prediction.
+    predictor
+        Model used to draw predictions.
+    num_samples
+        Number of samples to draw on the model when evaluating.
+
+    Returns
+    -------
+    """
+
+    #prediction_length = predictor.prediction_length
+    assert prediction_length >= predictor.prediction_length
+    freq = predictor.freq
+    lead_time = predictor.lead_time
+
+    def add_ts_dataframe(
+        data_iterator: Iterator[DataEntry],
+    ) -> Iterator[DataEntry]:
+        for data_entry in data_iterator:
+            data = data_entry.copy()
+            index = pd.date_range(
+                start=data["start"],
+                freq=freq,
+                periods=data["target"].shape[-1],
+            )
+            data["ts"] = pd.DataFrame(
+                index=index, data=data["target"].transpose()
+            )
+            yield data
+
+    def ts_iter(dataset: Dataset) -> pd.DataFrame:
+        for data_entry in add_ts_dataframe(iter(dataset)):
+            yield data_entry["ts"]
+
+    def truncate_target(data):
+        data = data.copy()
+        target = data["target"]
+        assert (
+            target.shape[-1] >= pred_i
+        )  # handles multivariate case (target_dim, history_length)
+        data["target"] = target[..., : -pred_i - lead_time]
+        return data
+
+    # TODO filter out time series with target shorter than prediction length
+    # TODO or fix the evaluator so it supports missing values instead (all
+    # TODO the test set may be gone otherwise with such a filtering)
+
+    # For each timepoint in the test sample, apply the one-step predictor.
+    # This means truncating the dataset using pred_i
+    forecast_lists = []
+    for pred_i in range(1, prediction_length+1):
+        # truncate_target will reference pred_i
+        dataset_trunc = TransformedDataset(
+            dataset, transformations=[transform.AdhocTransform(truncate_target)]
+        )
+        forecast_lists.append(list(predictor.predict(dataset_trunc, num_samples=num_samples)))
+    forecast_lists = list(zip(*forecast_lists))
+    forecasts_out = []
+    for timeseries in forecast_lists:
+        first_fc = timeseries[-1]
+        samples = [fc.samples for fc in timeseries]
+        samples.reverse()
+        samples = np.concatenate(samples, axis=1)
+        first_fc.samples = samples
+        fc = SampleForecast(samples, first_fc.start_date, first_fc.freq)
+        forecasts_out.append(fc)
+
+    # Now construct a new preds by combining the information from each.
+
+
+    return (
+        forecasts_out,
+        ts_iter(dataset),
+    )
 
 train_dataset_stats_key = "train_dataset_stats"
 test_dataset_stats_key = "test_dataset_stats"
